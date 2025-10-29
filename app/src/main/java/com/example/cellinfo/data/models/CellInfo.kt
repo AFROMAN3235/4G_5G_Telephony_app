@@ -17,12 +17,6 @@ data class CellIdentity(
     val nrarfcn: Int?
 )
 
-data class NetworkState(
-    val operatorName: String,
-    val networkType: String,
-    val isRoaming: Boolean,
-    val signalLevel: String
-)
 
 data class SignalStrength(
     val dbm: Int,

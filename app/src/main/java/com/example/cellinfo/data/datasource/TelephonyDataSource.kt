@@ -3,9 +3,8 @@ package com.example.cellinfo.data.datasource
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
+import android.telephony.CellSignalStrengthLte
 import android.telephony.TelephonyManager
-import android.telephony.CellInfoLte
-import android.telephony.CellInfoNr
 import android.util.Log
 import androidx.annotation.RequiresApi
 import androidx.core.content.ContextCompat
@@ -23,215 +22,136 @@ class TelephonyDataSource(private val context: Context) {
     fun getNetworkState(): NetworkState {
         return if (hasPermissions()) {
             try {
+                val operatorName = telephonyManager.networkOperatorName ?: "Unknown"
+                val networkType = telephonyManager.dataNetworkType
+                val isRoaming = telephonyManager.isNetworkRoaming
+
+                Log.d("TelephonyDataSource", "данные сети: Оператор=$operatorName, Тип=$networkType, Роуминг=$isRoaming")
+
                 NetworkState(
-                    operatorName = telephonyManager.networkOperatorName ?: "Unknown",
-                    networkType = getNetworkTypeName(telephonyManager.dataNetworkType),
-                    isRoaming = telephonyManager.isNetworkRoaming,
-                    signalLevel = getSignalLevelDescription(telephonyManager.dataNetworkType)
+                    operatorName = operatorName,
+                    networkType = getNetworkTypeName(networkType),
+                    isRoaming = isRoaming,
+                    signalLevel = getSignalLevelDescription(networkType)
                 )
             } catch (e: SecurityException) {
+                Log.e("TelephonyDataSource", "SecurityException при получении состояния сети: " + e.message)
                 NetworkState("Permission required", "Unknown", false, "No access")
             }
         } else {
+            Log.w("TelephonyDataSource", "Нет разрешений для получения состояния сети")
             NetworkState("Permission required", "Unknown", false, "No access")
         }
     }
 
     @RequiresApi(Build.VERSION_CODES.Q)
-    fun getCellInfo(): List<CellInfo> {
+    fun getRealCellInfoFromSignal(): List<CellInfo> {
         if (!hasPermissions()) {
-            Log.w("TelephonyDataSource", "No permissions to access cell info")
+            Log.w("TelephonyDataSource", "Нет разрешений для получения данных сигнала")
             return emptyList()
         }
 
         return try {
-            val allCellInfo = telephonyManager.allCellInfo
-            allCellInfo?.mapNotNull { it.toCellInfo() } ?: emptyList()
+            val signalStrength = telephonyManager.signalStrength
+
+            if (signalStrength == null) {
+                Log.w("TelephonyDataSource", "SignalStrength недоступен")
+                return emptyList()
+            }
+
+            val cellInfos = mutableListOf<CellInfo>()
+
+            signalStrength.cellSignalStrengths.forEach { signal ->
+                if (signal is CellSignalStrengthLte) {
+                    Log.d("TelephonyDataSource", "Обнаружен LTE сигнал: dbm=" + signal.dbm +
+                            ", level=" + signal.level +
+                            ", rsrp=" + signal.rsrp +
+                            ", rsrq=" + signal.rsrq +
+                            ", rssnr=" + signal.rssnr)
+
+                    val realCellInfo = createRealCellInfoFromLteSignal(signal)
+                    cellInfos.add(realCellInfo)
+                }
+            }
+
+            if (cellInfos.isEmpty()) {
+                Log.d("TelephonyDataSource", "LTE сигналы не обнаружены")
+            } else {
+                Log.d("TelephonyDataSource", "Обработано LTE сигналов: " + cellInfos.size)
+            }
+
+            cellInfos
+
         } catch (e: SecurityException) {
-            Log.e("TelephonyDataSource", "Security exception: ${e.message}")
+            Log.e("TelephonyDataSource", "SecurityException при получении сигнала: " + e.message)
+            emptyList()
+        } catch (e: Exception) {
+            Log.e("TelephonyDataSource", "Ошибка получения данных сигнала: " + e.message)
             emptyList()
         }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.Q)
+    private fun createRealCellInfoFromLteSignal(signal: CellSignalStrengthLte): CellInfo {
+        val operator = telephonyManager.simOperator ?: ""
+        val mcc = if (operator.length >= 3) operator.substring(0, 3) else ""
+        val mnc = if (operator.length > 3) operator.substring(3) else ""
+
+        Log.d("TelephonyDataSource", "CellInfo: MCC=$mcc, MNC=$mnc, dbm=" + signal.dbm)
+
+        return CellInfo(
+            technology = "LTE",
+            isRegistered = true,
+            signalStrength = SignalStrength(
+                dbm = signal.dbm,
+                asu = signal.asuLevel,
+                level = signal.level,
+                rsrp = signal.rsrp,
+                rsrq = signal.rsrq,
+                rssnr = signal.rssnr,
+                ssRsrp = null,
+                ssRsrq = null,
+                ssSinr = null,
+                csiRsrp = null,
+                csiRsrq = null
+            ),
+            cellIdentity = CellIdentity(
+                mcc = mcc,
+                mnc = mnc,
+                ci = null,
+                pci = null,
+                tac = null,
+                earfcn = null,
+                nrarfcn = null
+            )
+        )
     }
 
     private fun hasPermissions(): Boolean {
         val requiredPermissions = arrayOf(
             android.Manifest.permission.READ_PHONE_STATE,
-            android.Manifest.permission.ACCESS_COARSE_LOCATION
+            android.Manifest.permission.ACCESS_COARSE_LOCATION,
+            android.Manifest.permission.ACCESS_FINE_LOCATION
         )
-        return requiredPermissions.all { permission ->
+
+        val allGranted = requiredPermissions.all { permission ->
             ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
         }
+
+        return allGranted
     }
 
     private fun getNetworkTypeName(networkType: Int): String {
         return when (networkType) {
             TelephonyManager.NETWORK_TYPE_LTE -> "4G"
-            TelephonyManager.NETWORK_TYPE_NR -> "5G"
-            else -> "Unknown"
+            else -> "Unknown (" + networkType + ")"
         }
     }
 
     private fun getSignalLevelDescription(networkType: Int): String {
         return when (networkType) {
             TelephonyManager.NETWORK_TYPE_LTE -> "LTE Signal"
-            TelephonyManager.NETWORK_TYPE_NR -> "5G NR Signal"
-            else -> "No 4G/5G"
+            else -> "Unknown Signal"
         }
     }
-}
-
-
-@RequiresApi(Build.VERSION_CODES.Q)
-private fun android.telephony.CellInfo.toCellInfo(): CellInfo? {
-    return when (this) {
-        is CellInfoLte -> createLteCellInfo(this)
-        is CellInfoNr -> null
-        else -> null
-    }
-}
-
-@RequiresApi(Build.VERSION_CODES.O)
-private fun createLteCellInfo(cellInfo: CellInfoLte): CellInfo {
-    val signal = cellInfo.cellSignalStrength
-    val identity = cellInfo.cellIdentity
-
-    val mcc = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-        identity.mccString
-    } else {
-        identity.mcc?.toString()
-    }
-
-    val mnc = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-        identity.mncString
-    } else {
-        identity.mnc?.toString()
-    }
-
-    return CellInfo(
-        technology = "LTE",
-        isRegistered = cellInfo.isRegistered,
-        signalStrength = SignalStrength(
-            dbm = signal.dbm,
-            asu = signal.asuLevel,
-            level = signal.level,
-            rsrp = signal.rsrp,
-            rsrq = signal.rsrq,
-            rssnr = signal.rssnr,
-            ssRsrp = null, ssRsrq = null, ssSinr = null, csiRsrp = null, csiRsrq = null
-        ),
-        cellIdentity = CellIdentity(
-            mcc = mcc, mnc = mnc,
-            ci = identity.ci.takeIf { it != Int.MAX_VALUE }?.toLong(),
-            pci = identity.pci.takeIf { it != Int.MAX_VALUE },
-            tac = identity.tac.takeIf { it != Int.MAX_VALUE },
-            earfcn = identity.earfcn.takeIf { it != Int.MAX_VALUE },
-            nrarfcn = null
-        )
-    )
-}
-
-/*@RequiresApi(Build.VERSION_CODES.Q)
-private fun createNrCellInfo(cellInfo: CellInfoNr): CellInfo {
-    val signal = cellInfo.cellSignalStrength
-    val identity = cellInfo.cellIdentity
-
-
-    return CellInfo(
-        technology = "NR",
-        isRegistered = cellInfo.isRegistered,
-        signalStrength = SignalStrength(
-            dbm = signal.dbm,
-            asu = signal.asuLevel,
-            level = signal.level,
-            rsrp = null, rsrq = null, rssnr = null,
-            ssRsrp = getSsRsrp(signal),
-            ssRsrq = getSsRsrq(signal),
-            ssSinr = getSsSinr(signal),
-            csiRsrp = getCsiRsrp(signal),
-            csiRsrq = getCsiRsrq(signal)
-        ),
-        cellIdentity = CellIdentity(
-            mcc = getMccFromIdentity(identity),
-            mnc = getMncFromIdentity(identity),
-            ci = getNciFromIdentity(identity),
-            pci = getPciFromIdentity(identity),
-            tac = getTacFromIdentity(identity),
-            earfcn = null,
-            nrarfcn = getNrarfcnFromIdentity(identity)
-        )
-    )
-}
-*/
-
-
-@RequiresApi(Build.VERSION_CODES.Q)
-private fun getNciFromIdentity(identity: android.telephony.CellIdentity): Long? {
-    return try {
-        (identity as? android.telephony.CellIdentityNr)?.nci?.takeIf { it != Long.MAX_VALUE }
-    } catch (e: Exception) {
-        null
-    }
-}
-
-@RequiresApi(Build.VERSION_CODES.Q)
-private fun getPciFromIdentity(identity: android.telephony.CellIdentity): Int? {
-    return try {
-        (identity as? android.telephony.CellIdentityNr)?.pci?.takeIf { it != Int.MAX_VALUE }
-    } catch (e: Exception) {
-        null
-    }
-}
-
-@RequiresApi(Build.VERSION_CODES.Q)
-private fun getTacFromIdentity(identity: android.telephony.CellIdentity): Int? {
-    return try {
-        (identity as? android.telephony.CellIdentityNr)?.tac?.takeIf { it != Int.MAX_VALUE }
-    } catch (e: Exception) {
-        null
-    }
-}
-
-@RequiresApi(Build.VERSION_CODES.Q)
-private fun getNrarfcnFromIdentity(identity: android.telephony.CellIdentity): Int? {
-    return try {
-        (identity as? android.telephony.CellIdentityNr)?.nrarfcn?.takeIf { it != Int.MAX_VALUE }
-    } catch (e: Exception) {
-        null
-    }
-}
-
-
-@RequiresApi(Build.VERSION_CODES.Q)
-private fun getSsRsrp(signal: android.telephony.CellSignalStrength): Int? {
-    return if (signal is android.telephony.CellSignalStrengthNr) {
-        signal.ssRsrp.takeIf { it != Int.MAX_VALUE }
-    } else null
-}
-
-@RequiresApi(Build.VERSION_CODES.Q)
-private fun getSsRsrq(signal: android.telephony.CellSignalStrength): Int? {
-    return if (signal is android.telephony.CellSignalStrengthNr) {
-        signal.ssRsrq.takeIf { it != Int.MAX_VALUE }
-    } else null
-}
-
-@RequiresApi(Build.VERSION_CODES.Q)
-private fun getSsSinr(signal: android.telephony.CellSignalStrength): Int? {
-    return if (signal is android.telephony.CellSignalStrengthNr) {
-        signal.ssSinr.takeIf { it != Int.MAX_VALUE }
-    } else null
-}
-
-@RequiresApi(Build.VERSION_CODES.Q)
-private fun getCsiRsrp(signal: android.telephony.CellSignalStrength): Int? {
-    return if (signal is android.telephony.CellSignalStrengthNr) {
-        signal.csiRsrp.takeIf { it != Int.MAX_VALUE }
-    } else null
-}
-
-@RequiresApi(Build.VERSION_CODES.Q)
-private fun getCsiRsrq(signal: android.telephony.CellSignalStrength): Int? {
-    return if (signal is android.telephony.CellSignalStrengthNr) {
-        signal.csiRsrq.takeIf { it != Int.MAX_VALUE }
-    } else null
 }
